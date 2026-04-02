@@ -8,7 +8,7 @@ from typing import Callable
 # Stable-Baselines3
 from stable_baselines3 import PPO
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
-from stable_baselines3.common.callbacks import CheckpointCallback
+from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
 
 # 載入我們第二階段寫好的自定義環境 (與平行化工廠函數)
 from smc_env import create_vectorized_envs
@@ -66,7 +66,44 @@ def linear_schedule(initial_value: float) -> Callable[[float], float]:
 
 
 # ==============================================================
-# 3. 主循環訓練腳本 (PPO)
+# 3. 中文化 TensorBoard 監控擴充 (自定義 Callback)
+# ==============================================================
+
+class ChineseTensorboardCallback(BaseCallback):
+    """
+    自定義回調函數：抓取環境中的財務數據，並以中文標籤推送到 TensorBoard
+    這樣在 TensorBoard 的圖表標題就會顯示為中文了！
+    """
+    def __init__(self, verbose=0):
+        super().__init__(verbose)
+        self.net_worth_buffer = []
+        self.drawdown_buffer = []
+
+    def _on_step(self) -> bool:
+        # 遍歷所有平行環境傳回的 info 字典
+        for info in self.locals.get("infos", []):
+            if "net_worth" in info:
+                self.net_worth_buffer.append(info["net_worth"])
+            if "drawdown" in info:
+                self.drawdown_buffer.append(info["drawdown"])
+                
+        # 蒐集 100 筆更新後輸出為中文圖表
+        if len(self.net_worth_buffer) >= 100:
+            self.logger.record("📂 分類：策略資金表現/💰 平均資產淨值", np.mean(self.net_worth_buffer))
+            self.logger.record("📂 分類：策略資金表現/📉 平均目前回撤", np.mean(self.drawdown_buffer))
+            
+            # 同時輸出一個中文進度條
+            self.logger.record("📂 分類：系統狀態/⏱️ 總訓練步數", self.num_timesteps)
+            
+            # 清空準備收攏下一批
+            self.net_worth_buffer = []
+            self.drawdown_buffer = []
+            
+        return True
+
+
+# ==============================================================
+# 4. 主循環訓練腳本 (PPO)
 # ==============================================================
 
 if __name__ == "__main__":
@@ -111,7 +148,7 @@ if __name__ == "__main__":
         verbose=1
     )
     
-    # [E] 設定每隔固定步數就自動儲存模型 (避免訓練到一半當機)
+    # [E] 設定存檔回調與中文監控回調
     os.makedirs("./models", exist_ok=True)
     # save_freq 的單位是 "每一個獨立環境的步數"，總計為 save_freq * num_cpu
     checkpoint_callback = CheckpointCallback(
@@ -120,11 +157,13 @@ if __name__ == "__main__":
         name_prefix="smc_ppo_rtx3090"
     )
     
+    chinese_logger = ChineseTensorboardCallback()
+    
     # [F] 啟動訓練
     print(f"Starting training on {model.device} with Tensorboard enabled...")
     try:
-        # 開始利用多進程採樣並訓練
-        model.learn(total_timesteps=100_000, callback=checkpoint_callback, progress_bar=True)
+        # 開始利用多進程採樣並訓練，一次放入多種回調函數
+        model.learn(total_timesteps=100_000, callback=[checkpoint_callback, chinese_logger], progress_bar=True)
         # 儲存最終模型
         model.save("./models/smc_ppo_rtx3090_final")
         print("\n🎉 Training complete! Model successfully saved at ./models/smc_ppo_rtx3090_final")
